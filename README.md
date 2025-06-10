@@ -1,4 +1,4 @@
-# Meru-Case-Study
+# Meru-Case-Study: Budget Cleanup
 -- STEP 1: Filter out metadata and invalid rows from the raw budget
 -- - Remove header rows where C1 = 'Customer Code'
 -- - Ensure C2 (Item Code) is numeric
