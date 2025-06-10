@@ -1,4 +1,5 @@
-# Meru-Case-Study: Budget Cleanup
+# Meru-Case-Study: Data Cleanup SQL Queries
+# Budget Cleanup
 -- STEP 1: Filter out metadata and invalid rows from the raw budget
 -- - Remove header rows where C1 = 'Customer Code'
 -- - Ensure C2 (Item Code) is numeric
@@ -89,3 +90,164 @@ FROM raw_budget_clean;
 -- STEP 4: Preview the cleaned and normalized budget data
 SELECT *
 FROM cleaned_budget;
+
+# Case Weight Cleanup
+-- STEP 1: View raw case weight data
+-- - Used for validation and understanding of structure
+
+SELECT *
+FROM cs.public.raw_caseweights;
+
+
+-- STEP 2: Create cleaned case weight table
+-- - Trim whitespace from item numbers
+-- - Convert case weight to numeric with two decimal places
+-- - Exclude invalid item numbers that contain or equal '-1'
+
+CREATE OR REPLACE TABLE cleaned_caseweights AS
+SELECT 
+    TRIM(item_no) AS item_code,                          -- standardize item codes
+    CAST(case_weight_lb AS NUMBER(10,2)) AS case_weight_lb  -- preserve decimal precision
+FROM raw_caseweights
+WHERE TRIM(item_no) NOT LIKE '%-1%'                      -- exclude partial '-1' values
+  AND TRIM(item_no) != '-1';                             -- exclude exact '-1' codes
+
+
+-- STEP 3: Preview the cleaned case weights
+SELECT *
+FROM cleaned_caseweights;
+
+# Historical Sales Cleanup
+-- Step 1: View raw historical sales data.
+SELECT *
+FROM cs.public.raw_historical_sales;
+
+-- Step 2: Clean and prepare historical sales data for combination.
+-- Rename fields for consistency.
+-- Cast item and customer codes as text to preserve formatting.
+-- Clean and convert numeric fields for quantity, dollar, and weight.
+-- Create a readable month label for time-based analysis.
+
+CREATE OR REPLACE TABLE cleaned_historical_sales AS
+SELECT
+    business_line AS business,                                           -- Standardize business field name.
+
+    CAST(item_code AS VARCHAR) AS item_code,                             -- Preserve item codes as text.
+    CAST(customer_code AS VARCHAR) AS customer_code,                     -- Preserve customer codes as text.
+
+    TRY_TO_NUMBER(REPLACE(quantity, ',', '')) AS quantity,               -- Convert quantity to integer.
+    TRY_TO_NUMBER(REPLACE(REPLACE(total_amt, '$', ''), ',', '')) AS dollar,  -- Clean and convert dollar amount.
+
+    channel,                                                             -- Retain sales channel info.
+    item_group,                                                          -- Retain item group info.
+    branded_pl,                                                          -- Retain brand flag.
+    states,                                                              -- Retain regional information.
+
+    TRY_TO_NUMBER(REPLACE(lbspercase, ',', '')) AS lbspercase,          -- Clean and convert weight per case.
+    TRY_TO_NUMBER(REPLACE(lbs, ',', '')) AS lbs,                         -- Clean and convert total pounds.
+
+    TO_CHAR(TO_DATE(year || '-' || month || '-01', 'YYYY-MM-DD'), 'MON-YY') AS month_label  -- Format month.
+
+FROM cs.public.raw_historical_sales;
+
+-- Step 3: Preview cleaned historical sales data.
+SELECT *
+FROM cleaned_historical_sales;
+
+# Budget and Case Weight Join
+-- Step 1: Create cleaned budget table with case weights.
+-- Join budget data with case weights by item code.
+-- Calculate pounds (LBS) as cases multiplied by case weight.
+-- Round LBS to two decimal places for accuracy.
+
+CREATE OR REPLACE TABLE cleaned_budget_with_weight AS
+SELECT 
+    b.customer_code,                                   -- Customer identifier.
+    b.item_code,                                       -- Product identifier.
+    b.business,                                        -- Business line.
+    b.channel,                                         -- Sales channel.
+    b.branded_pl,                                      -- Brand flag.
+    b.item_group,                                      -- Product grouping.
+    b.month,                                           -- Time period.
+    b.cases,                                           -- Number of cases.
+    b.dollar,                                          -- Dollar amount.
+    cw.case_weight_lb,                                 -- Case weight from reference table.
+    ROUND(b.cases * cw.case_weight_lb, 2) AS lbs       -- Total pounds, rounded to 2 decimals.
+FROM cleaned_budget b
+LEFT JOIN cleaned_caseweights cw
+    ON b.item_code = cw.item_code;
+
+-- Step 2: Preview the cleaned budget with weight data.
+SELECT *
+FROM cleaned_budget_with_weight;
+
+# Final Table
+-- Step 1: Combine historical sales and budget forecast into a unified table.
+
+CREATE OR REPLACE TABLE final_combined_data AS
+
+-- Part 1: Historical sales (actuals).
+SELECT
+    business,
+    item_code,
+    customer_code,
+    channel,
+    item_group,
+    CASE 
+        WHEN channel = 'Retail' THEN 'Branded'
+        WHEN channel = 'Retail Private Label' THEN 'PL'
+        WHEN branded_pl IN ('PL', 'Private Label') THEN 'PL'
+        ELSE branded_pl
+    END AS branded_pl,
+    month_label AS month,
+    quantity AS cases,
+    dollar AS amount,
+    lbspercase AS weight_per_case,
+    lbs AS total_weight
+FROM cleaned_historical_sales
+WHERE business IS NOT NULL
+  AND item_code IS NOT NULL
+  AND customer_code IS NOT NULL
+  AND channel IS NOT NULL
+  AND item_group IS NOT NULL
+  AND month_label IS NOT NULL
+  AND quantity IS NOT NULL
+  AND dollar IS NOT NULL
+  AND lbspercase IS NOT NULL
+  AND lbs IS NOT NULL
+
+UNION ALL
+
+-- Part 2: Budget with weights (forecast).
+SELECT
+    business,
+    item_code,
+    customer_code,
+    channel,
+    item_group,
+    CASE 
+        WHEN channel = 'Retail' THEN 'Branded'
+        WHEN channel = 'Retail Private Label' THEN 'PL'
+        WHEN branded_pl IN ('PL', 'Private Label') THEN 'PL'
+        ELSE branded_pl
+    END AS branded_pl,
+    month AS month,
+    cases,
+    dollar AS amount,
+    case_weight_lb AS weight_per_case,
+    lbs AS total_weight
+FROM cleaned_budget_with_weight
+WHERE business IS NOT NULL
+  AND item_code IS NOT NULL
+  AND customer_code IS NOT NULL
+  AND channel IS NOT NULL
+  AND item_group IS NOT NULL
+  AND month IS NOT NULL
+  AND cases IS NOT NULL
+  AND dollar IS NOT NULL
+  AND case_weight_lb IS NOT NULL
+  AND lbs IS NOT NULL;
+
+-- Step 2: Preview the final combined dataset.
+SELECT *
+FROM final_combined_data;
